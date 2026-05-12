@@ -1,10 +1,9 @@
 #!/bin/bash -e
 set -o pipefail
 
-deps="git meson ninja patchelf unzip curl pip flex bison zip glslangValidator python3"
+# 將 Android NDK 依賴改為標準 aarch64-linux-gnu-gcc 工具
+deps="git meson ninja patchelf unzip curl pip flex bison zip glslangValidator python3 aarch64-linux-gnu-gcc"
 workdir="$(pwd)/turnip_workdir"
-ndkver="android-ndk-r29"
-ndk="$workdir/$ndkver/toolchains/llvm/prebuilt/linux-x86_64/bin"
 mesasrc="https://github.com/whitebelyash/mesa-tu8.git"
 srcfolder="mesa"
 BUILD_VERSION="${BUILD_VERSION:-1.0}"
@@ -12,12 +11,13 @@ BUILD_VERSION="${BUILD_VERSION:-1.0}"
 run_all(){
     check_deps
     prepare_workdir
-    build_lib_for_android gen8
+    build_lib_for_linux gen8
 }
 
 check_deps(){
     for deps_chk in $deps; do
         if ! command -v "$deps_chk" >/dev/null 2>&1 ; then
+            echo "Missing dependency: $deps_chk"
             exit 1
         fi
     done
@@ -26,12 +26,6 @@ check_deps(){
 
 prepare_workdir(){
     mkdir -p "$workdir" && cd "$workdir"
-
-    if [ ! -d "$ndkver" ]; then
-        curl -sL "https://dl.google.com/android/repository/${ndkver}-linux.zip" -o "${ndkver}-linux.zip" &> /dev/null
-        unzip -q "${ndkver}-linux.zip" &> /dev/null
-    fi
-
     rm -rf "$srcfolder"
     git clone "$mesasrc" --depth=1 --no-single-branch "$srcfolder"
     cd "$srcfolder"
@@ -39,28 +33,86 @@ prepare_workdir(){
     echo "#define TUGEN8_DRV_VERSION \"\"" > ./src/freedreno/vulkan/tu_version.h
 }
 
-build_lib_for_android(){
+build_lib_for_linux(){
     cd "$workdir/$srcfolder"
     git checkout "origin/$1"
 
-    sed -i 's/ (%s)//g' src/freedreno/vulkan/tu_device.cc || true
-    sed -i 's/ (%s)//g' src/freedreno/vulkan/tu_device.c || true
-
+    # 保留可能需要的硬體修正 (移除了 Android stub 的 sed 替換)
     sed -i '/a7xx_gen1 = GPUProps(/a \        has_early_preamble = False,' src/freedreno/common/freedreno_devices.py || true
-    sed -i 's/typedef const native_handle_t\* buffer_handle_t;/typedef void\* buffer_handle_t;/g' include/android_stub/cutils/native_handle.h || true
-    sed -i 's/, hnd->handle/, (void \*)hnd->handle/g' src/util/u_gralloc/u_gralloc_fallback.c || true
-    sed -i 's/native_buffer->handle->/((const native_handle_t \*)native_buffer->handle)->/g' src/vulkan/runtime/vk_android.c || true
-    sed -i 's/anb->handle->/((const native_handle_t \*)anb->handle)->/g' src/vulkan/runtime/vk_android.c || true
 
-    mkdir -p "$workdir/bin"
-    ln -sf "$ndk/clang" "$workdir/bin/cc"
-    ln -sf "$ndk/clang++" "$workdir/bin/c++"
-    export PATH="$workdir/bin:$ndk:$PATH"
-    export CC=clang
-    export CXX=clang++
-    export AR=llvm-ar
-    export RANLIB=llvm-ranlib
-    export STRIP=llvm-strip
+    # 建立標準 Linux ARM64 交叉編譯設定檔
+    cat <<EOF >"linux-aarch64.txt"
+[binaries]
+c = 'aarch64-linux-gnu-gcc'
+cpp = 'aarch64-linux-gnu-g++'
+ar = 'aarch64-linux-gnu-ar'
+strip = 'aarch64-linux-gnu-strip'
+pkg-config = 'aarch64-linux-gnu-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'armv8'
+endian = 'little'
+EOF
+
+    # 針對 Linux 平台進行編譯 (開啟 X11, Wayland 支援，保留 KGSL 後台)
+    meson setup build-linux-aarch64 \
+        --cross-file "linux-aarch64.txt" \
+        --prefix "/tmp/turnip-$1" \
+        -Dbuildtype=release \
+        -Dstrip=true \
+        -Dplatforms=x11,wayland \
+        -Dgallium-drivers= \
+        -Dvulkan-drivers=freedreno \
+        -Dvulkan-beta=true \
+        -Dfreedreno-kmds=kgsl \
+        -Degl=disabled \
+        -Dglx=disabled \
+        -Dopengl=false \
+        -Dshared-glapi=false
+
+    ninja -C build-linux-aarch64 install
+
+    # 確保編譯成功 (Linux multiarch 可能會安裝在 lib/aarch64-linux-gnu 或是 lib/)
+    LIB_PATH=$(find "/tmp/turnip-$1/lib" -name "libvulkan_freedreno.so" | head -n 1)
+    if [ -z "$LIB_PATH" ]; then
+        echo "Build failed: libvulkan_freedreno.so not found!"
+        exit 1
+    fi
+
+    # 找出系統生成的標準 Vulkan ICD 檔案
+    ICD_PATH=$(find "/tmp/turnip-$1/share/vulkan/icd.d" -name "freedreno_icd.*.json" | head -n 1)
+
+    mkdir -p "/tmp/pkg-$1"
+    cp "$LIB_PATH" "/tmp/pkg-$1/"
+    if [ -n "$ICD_PATH" ]; then
+        cp "$ICD_PATH" "/tmp/pkg-$1/"
+    fi
+
+    cd "/tmp/pkg-$1"
+    
+    # 為了相容 Winlator UI 直接匯入的習慣，保留 meta.json
+    cat <<EOF >"meta.json"
+{
+  "schemaVersion": 1,
+  "name": "Turnip Gen8 (glibc/Ubuntu)",
+  "description": "A8xx support for Linux chroot",
+  "author": "stevenmx",
+  "packageVersion": "1",
+  "vendor": "Mesa",
+  "driverVersion": "Vulkan 1.4.348",
+  "minApi": 28,
+  "libraryName": "libvulkan_freedreno.so"
+}
+EOF
+
+    # 將生成的驅動與 ICD 打包
+    zip -9 "/tmp/a8xx-$1-V${BUILD_VERSION}-glibc.zip" libvulkan_freedreno.so meta.json *.json
+    cp "/tmp/a8xx-$1-V${BUILD_VERSION}-glibc.zip" "$workdir/"
+}
+
+run_all    export STRIP=llvm-strip
     export OBJDUMP=llvm-objdump
     export OBJCOPY=llvm-objcopy
     export LDFLAGS="-fuse-ld=lld"
