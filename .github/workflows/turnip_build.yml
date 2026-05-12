@@ -1,4 +1,4 @@
-name: Build Turnip
+name: Build Turnip (Linux glibc)
 
 on:
   workflow_dispatch:
@@ -14,10 +14,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Setup Multiarch and Install Dependencies
         run: |
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y ninja-build patchelf unzip flex bison git perl python3-pip glslang-tools curl zip
+          sudo apt-get install -y \
+            crossbuild-essential-arm64 \
+            libx11-dev:arm64 libxext-dev:arm64 libxcb1-dev:arm64 \
+            libx11-xcb-dev:arm64 libxshmfence-dev:arm64 \
+            libxcb-dri2-0-dev:arm64 libxcb-dri3-dev:arm64 \
+            libxcb-present-dev:arm64 libxcb-randr0-dev:arm64 \
+            libxcb-sync-dev:arm64 libwayland-dev:arm64 libvulkan-dev:arm64 \
+            libdrm-dev:arm64 zlib1g-dev:arm64 \
+            ninja-build patchelf unzip flex bison git perl python3-pip \
+            glslang-tools curl zip pkg-config pkg-config-aarch64-linux-gnu
           pip3 install --break-system-packages meson mako
 
       - name: Build Drivers
@@ -29,7 +39,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Turnip-Drivers
+          name: Turnip-Drivers-glibc
           path: turnip_workdir/*.zip
 
       - name: Release
