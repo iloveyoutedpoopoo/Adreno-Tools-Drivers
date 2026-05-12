@@ -8,16 +8,32 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04 # 改用 22.04 避免 24.04 新版 apt 源格式問題，也增加 chroot 相容性
     
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Multiarch and Install Dependencies
+      - name: Setup Multiarch and APT sources
         run: |
           sudo dpkg --add-architecture arm64
+          
+          # 將原本的 amd64 來源加上架構標籤，避免 apt 去這裡找 arm64 發生 404
+          sudo sed -i 's/deb http/deb [arch=amd64,i386] http/g' /etc/apt/sources.list
+          sudo sed -i 's/deb mirror/deb [arch=amd64,i386] mirror/g' /etc/apt/sources.list
+          
+          # 新增專門給 arm64 使用的 ports.ubuntu.com 來源
+          cat <<EOF | sudo tee /etc/apt/sources.list.d/arm64.list
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
+          EOF
+          
+          # 更新套件清單
           sudo apt-get update
+
+      - name: Install Dependencies
+        run: |
           sudo apt-get install -y \
             crossbuild-essential-arm64 \
             libx11-dev:arm64 libxext-dev:arm64 libxcb1-dev:arm64 \
@@ -28,7 +44,9 @@ jobs:
             libdrm-dev:arm64 zlib1g-dev:arm64 \
             ninja-build patchelf unzip flex bison git perl python3-pip \
             glslang-tools curl zip pkg-config pkg-config-aarch64-linux-gnu
-          pip3 install --break-system-packages meson mako
+          
+          # 在 Ubuntu 22.04 裝 meson 比較簡單
+          pip3 install meson mako || pip3 install --break-system-packages meson mako
 
       - name: Build Drivers
         run: |
