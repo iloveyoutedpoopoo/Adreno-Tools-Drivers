@@ -1,8 +1,7 @@
 #!/bin/bash -e
 set -o pipefail
 
-# 將 Android NDK 依賴改為標準 aarch64-linux-gnu-gcc 工具
-deps="git meson ninja patchelf unzip curl pip flex bison zip glslangValidator python3 aarch64-linux-gnu-gcc"
+deps="git meson ninja patchelf unzip curl flex bison zip glslangValidator python3 aarch64-linux-gnu-gcc aarch64-linux-gnu-pkg-config"
 workdir="$(pwd)/turnip_workdir"
 mesasrc="https://github.com/whitebelyash/mesa-tu8.git"
 srcfolder="mesa"
@@ -21,7 +20,7 @@ check_deps(){
             exit 1
         fi
     done
-    pip install mako --break-system-packages &> /dev/null || true
+    pip3 install mako --break-system-packages &> /dev/null || true
 }
 
 prepare_workdir(){
@@ -35,6 +34,83 @@ prepare_workdir(){
 
 build_lib_for_linux(){
     cd "$workdir/$srcfolder"
+    git checkout "origin/$1"
+
+    # 保留 Gen8 硬體修正
+    sed -i '/a7xx_gen1 = GPUProps(/a \        has_early_preamble = False,' src/freedreno/common/freedreno_devices.py || true
+
+    # 建立標準 Linux ARM64 交叉編譯設定檔
+    cat <<EOF >"linux-aarch64.txt"
+[binaries]
+c = 'aarch64-linux-gnu-gcc'
+cpp = 'aarch64-linux-gnu-g++'
+ar = 'aarch64-linux-gnu-ar'
+strip = 'aarch64-linux-gnu-strip'
+pkg-config = 'aarch64-linux-gnu-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'armv8'
+endian = 'little'
+EOF
+
+    # 針對 Linux 平台進行編譯 (開啟 X11, Wayland 支援)
+    meson setup build-linux-aarch64 \
+        --cross-file "linux-aarch64.txt" \
+        --prefix "/tmp/turnip-$1" \
+        -Dbuildtype=release \
+        -Dstrip=true \
+        -Dplatforms=x11,wayland \
+        -Dgallium-drivers= \
+        -Dvulkan-drivers=freedreno \
+        -Dvulkan-beta=true \
+        -Dfreedreno-kmds=kgsl \
+        -Degl=disabled \
+        -Dglx=disabled \
+        -Dopengl=false \
+        -Dshared-glapi=false
+
+    ninja -C build-linux-aarch64 install
+
+    # 找出編譯出來的驅動與設定檔
+    LIB_PATH=$(find "/tmp/turnip-$1/lib" -name "libvulkan_freedreno.so" | head -n 1)
+    ICD_PATH=$(find "/tmp/turnip-$1/share/vulkan/icd.d" -name "freedreno_icd.*.json" | head -n 1)
+
+    if [ -z "$LIB_PATH" ]; then
+        echo "Build failed: libvulkan_freedreno.so not found!"
+        exit 1
+    fi
+
+    mkdir -p "/tmp/pkg-$1"
+    cp "$LIB_PATH" "/tmp/pkg-$1/"
+    if [ -n "$ICD_PATH" ]; then
+        cp "$ICD_PATH" "/tmp/pkg-$1/"
+    fi
+
+    cd "/tmp/pkg-$1"
+    
+    # 保留 meta.json
+    cat <<EOF >"meta.json"
+{
+  "schemaVersion": 1,
+  "name": "Turnip Gen8 (glibc/Ubuntu)",
+  "description": "A8xx support for Linux chroot",
+  "author": "stevenmx",
+  "packageVersion": "1",
+  "vendor": "Mesa",
+  "driverVersion": "Vulkan 1.4.348",
+  "minApi": 28,
+  "libraryName": "libvulkan_freedreno.so"
+}
+EOF
+
+    # 將生成的驅動與 ICD 打包
+    zip -9 "/tmp/a8xx-$1-V${BUILD_VERSION}-glibc.zip" libvulkan_freedreno.so meta.json *.json
+    cp "/tmp/a8xx-$1-V${BUILD_VERSION}-glibc.zip" "$workdir/"
+}
+
+run_all    cd "$workdir/$srcfolder"
     git checkout "origin/$1"
 
     # 保留可能需要的硬體修正 (移除了 Android stub 的 sed 替換)
