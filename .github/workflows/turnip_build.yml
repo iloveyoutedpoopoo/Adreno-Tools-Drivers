@@ -1,4 +1,4 @@
-name: Build Turnip (Linux glibc)
+name: Build Turnip Glibc
 
 on:
   workflow_dispatch:
@@ -14,39 +14,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Multiarch and APT sources
+      - name: Setup Multiarch & Install Dependencies
         run: |
+          # 1. 告訴系統我們要安裝 ARM64 的庫
           sudo dpkg --add-architecture arm64
           
-          # 將原本的 amd64 來源加上架構標籤，避免 apt 去這裡找 arm64 發生 404
-          sudo sed -i 's/deb http/deb [arch=amd64,i386] http/g' /etc/apt/sources.list
-          sudo sed -i 's/deb mirror/deb [arch=amd64,i386] mirror/g' /etc/apt/sources.list
+          # 2. 修改軟體源設定，讓 apt 能抓到 ARM64 架構的檔案
+          sudo sed -i 's/^deb /deb [arch=amd64,i386] /g' /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
           
-          # 新增專門給 arm64 使用的 ports.ubuntu.com 來源
-          cat <<EOF | sudo tee /etc/apt/sources.list.d/arm64.list
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
-          EOF
+          sudo apt-get update || true
           
-          # 更新套件清單
-          sudo apt-get update
-
-      - name: Install Dependencies
-        run: |
-          # 在這裡移除了 pkg-config-aarch64-linux-gnu，只保留 pkg-config
-          sudo apt-get install -y \
-            crossbuild-essential-arm64 \
-            libx11-dev:arm64 libxext-dev:arm64 libxcb1-dev:arm64 \
-            libx11-xcb-dev:arm64 libxshmfence-dev:arm64 \
-            libxcb-dri2-0-dev:arm64 libxcb-dri3-dev:arm64 \
-            libxcb-present-dev:arm64 libxcb-randr0-dev:arm64 \
-            libxcb-sync-dev:arm64 libwayland-dev:arm64 libvulkan-dev:arm64 \
-            libdrm-dev:arm64 zlib1g-dev:arm64 \
-            ninja-build patchelf unzip flex bison git perl python3-pip \
-            glslang-tools curl zip pkg-config
+          # 3. 安裝標準工具與 ARM64 交叉編譯器
+          sudo apt-get install -y crossbuild-essential-arm64 ninja-build patchelf unzip flex bison git perl python3-pip glslang-tools curl zip pkg-config
           
-          pip3 install meson mako || pip3 install --break-system-packages meson mako
+          # 4. 安裝 ARM64 版本的顯示相關標頭檔 (讓 meson x11/wayland 檢測能通過)
+          sudo apt-get install -y libdrm-dev:arm64 libx11-dev:arm64 libx11-xcb-dev:arm64 libxext-dev:arm64 libxcb-glx0-dev:arm64 libxcb-shm0-dev:arm64 libxcb-dri2-0-dev:arm64 libxcb-dri3-dev:arm64 libxcb-present-dev:arm64 libxshmfence-dev:arm64 libxrandr-dev:arm64 libwayland-dev:arm64 wayland-protocols
+          
+          pip3 install --break-system-packages meson mako
 
       - name: Build Drivers
         run: |
@@ -57,7 +43,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Turnip-Drivers-glibc
+          name: Turnip-Glibc-Drivers
           path: turnip_workdir/*.zip
 
       - name: Release
